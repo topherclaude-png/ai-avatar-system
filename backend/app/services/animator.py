@@ -38,6 +38,11 @@ class AvatarAnimator:
         self._worker_proc: Optional[asyncio.subprocess.Process] = None
         self._worker_lock = asyncio.Lock()
         self._worker_env: dict = {}
+        # Worker stderr goes to a FILE, not a pipe: an unread stderr pipe
+        # fills up and freezes the child mid-load, and reading it for
+        # diagnostics while the child is alive blocks forever (no EOF).
+        self._worker_stderr_path = TMPDIR / "musetalk_worker.stderr.log"
+        self._worker_stderr_file = None
         # Templates the current worker process has already prepared. First
         # job per template pays one-time prep (video frame extraction +
         # landmarks + VAE) and gets a long timeout; later jobs are fast.
@@ -125,6 +130,48 @@ class AvatarAnimator:
 
     # ── persistent worker management ─────────────────────────────────────────
 
+    def _stderr_tail(self, max_bytes: int = 4000) -> str:
+        """Last chunk of the worker's stderr log, for error messages."""
+        try:
+            data = self._worker_stderr_path.read_bytes()
+            return data[-max_bytes:].decode(errors="replace")
+        except Exception:
+            return "<no stderr captured>"
+
+    async def _await_worker_line(self, proc, timeout: float, *, ready: bool):
+        """
+        Read worker stdout until the line we want, SKIPPING chatter: the
+        MuseTalk libs print loader/progress text to stdout ("reading
+        images...", model-load messages), which otherwise corrupts the
+        READY handshake and the JSON job protocol. `ready=True` waits for
+        the READY sentinel and returns it; `ready=False` waits for a JSON
+        object line and returns it parsed. Bounded by `timeout` overall —
+        raises asyncio.TimeoutError past the deadline, RuntimeError (with
+        the stderr tail) if the worker exits.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+            if not line:  # EOF — worker died
+                raise RuntimeError(
+                    f"MuseTalk worker exited unexpectedly. stderr tail:\n{self._stderr_tail()}"
+                )
+            text = line.decode(errors="replace").strip()
+            if not text:
+                continue
+            if ready and text.startswith("READY"):
+                return text
+            if not ready and text.startswith("{"):
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    pass  # chatter that merely looks like JSON — fall through
+            logger.info(f"[musetalk-worker] {text[:200]}")
+
     async def _ensure_worker(self) -> asyncio.subprocess.Process:
         """Start the persistent worker if not already running."""
         if self._worker_proc is not None and self._worker_proc.returncode is None:
@@ -136,12 +183,19 @@ class AvatarAnimator:
         logger.info("Starting persistent MuseTalk worker (loading models once)…")
         # Fresh process → its in-memory template prep is empty again.
         self._prepared_templates.clear()
+        # stderr → file (append): see __init__ note on why never a pipe.
+        if self._worker_stderr_file is not None:
+            try:
+                self._worker_stderr_file.close()
+            except Exception:
+                pass
+        self._worker_stderr_file = open(self._worker_stderr_path, "ab")
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             str(worker_script),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=self._worker_stderr_file,
             cwd=str(musetalk_dir),
             env=self._worker_env,
         )
@@ -176,17 +230,11 @@ class AvatarAnimator:
                 f"Waiting for worker to finish loading models (timeout={model_load_timeout}s)…"
             )
             try:
-                ready_line = await asyncio.wait_for(
-                    proc.stdout.readline(), timeout=model_load_timeout
-                )
+                await self._await_worker_line(proc, model_load_timeout, ready=True)
             except asyncio.TimeoutError:
                 raise RuntimeError("MuseTalk worker timed out while loading models")
-
-            if not ready_line.decode().strip().startswith("READY"):
-                stderr_out = await proc.stderr.read()
-                raise RuntimeError(
-                    f"Worker failed to start. stderr:\n{stderr_out.decode(errors='replace')}"
-                )
+            except RuntimeError:
+                raise  # worker died — already carries the stderr tail
         except BaseException:
             # Covers errors AND cancellation (barge-in lands here when a fresh
             # user input cancels the turn mid-spawn). Without this, a
@@ -240,20 +288,18 @@ class AvatarAnimator:
             else:
                 infer_timeout = 900 if first_job else 300
             try:
-                result_line = await asyncio.wait_for(proc.stdout.readline(), timeout=infer_timeout)
+                result = await self._await_worker_line(proc, infer_timeout, ready=False)
             except asyncio.TimeoutError:
                 proc.kill()
                 self._worker_proc = None
                 raise RuntimeError(f"MuseTalk inference timed out after {infer_timeout}s")
-
-            # Empty read == worker exited mid-job (EOF on stdout). Reset so the
-            # next call respawns instead of erroring on a half-dead process.
-            if not result_line:
+            except RuntimeError:
+                # Worker died mid-job (EOF). Reset so the next call respawns
+                # instead of erroring on a half-dead process.
                 proc.kill()
                 self._worker_proc = None
-                raise RuntimeError("MuseTalk worker exited before returning a result")
+                raise
 
-            result = json.loads(result_line.decode().strip())
             if result["status"] != "ok":
                 raise RuntimeError(result.get("msg", "Unknown worker error"))
 
