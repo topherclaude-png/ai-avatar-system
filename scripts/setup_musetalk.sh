@@ -165,6 +165,32 @@ else
   exit 1
 fi
 
+# ── 3c. Patch face_parsing for PyTorch >= 2.6 ───────────────────────────────
+# torch.load defaults to weights_only=True since 2.6; MuseTalk's BiSeNet /
+# ResNet18 checkpoints are legacy-format and fail to load, which crashes the
+# worker at FaceParsing() on every start (each chunk then burns ~25s failing
+# and falls back to no-lip-sync "simple" mode). The checkpoints come from
+# pytorch.org and the MuseTalk release, so weights_only=False is acceptable.
+echo ""
+echo "[3c/5] Patching face_parsing torch.load for PyTorch >= 2.6..."
+FP_DIR="$MUSETALK_DIR/musetalk/utils/face_parsing"
+"$VENV_PYTHON" - << PATCHEOF
+import re
+for name in ("__init__.py", "resnet.py"):
+    p = "$FP_DIR/" + name
+    s = open(p).read()
+    # add weights_only=False to any torch.load(...) that doesn't have it yet
+    s2 = re.sub(r"torch\.load\(([^)]*?)\)(?![^\n]*weights_only)",
+                lambda m: "torch.load(" + m.group(1) + ", weights_only=False)"
+                if "weights_only" not in m.group(1) else m.group(0), s)
+    if s2 != s:
+        open(p, "w").write(s2)
+        print(f"  {name} patched")
+    else:
+        print(f"  {name} already ok")
+PATCHEOF
+echo "  face_parsing patched ✓"
+
 # ── 4. Download model weights from HuggingFace ──────────────────────────────
 echo ""
 echo "[4/5] Downloading MuseTalk model weights (~8.8 GB total)..."
