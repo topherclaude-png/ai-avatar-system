@@ -77,6 +77,27 @@ class Settings(BaseSettings):
     # frontend can render as a QR. Replaced by real checkout links post-POC.
     PAYMENT_URL_STUB: str = "https://you42.example.com/pay"
 
+    # Kiosk system prompt file (empty = repo default per-avatar behavior).
+    # When set, every session uses this prompt with {now} date grounding
+    # injected at connect time (overrides avatar-metadata prompts — kiosk
+    # mode is an explicit opt-in). E.g. prompts/you42_kiosk.md
+    SYSTEM_PROMPT_FILE: str = ""
+
+    # Guardrail Layer 3 — I/O moderation hook points. POC: hooks are
+    # pass-through even when enabled (enabled just logs at the hook
+    # positions); pilot wires Llama Guard into the hook bodies.
+    MODERATION_ENABLED: bool = False
+
+    # Guardrail Layer 5 — per-session JSONL transcripts with flags
+    # (injection_attempt / refusal / moderation_hit / tool_calls).
+    # Empty string disables.
+    TRANSCRIPT_LOG_DIR: str = "logs/transcripts"
+
+    # Guardrail Layer 4 — kiosk session limits. 0 disables (repo default);
+    # the POC kiosk config sets 40 turns / 10 minutes per the brief.
+    MAX_SESSION_TURNS: int = 0
+    MAX_SESSION_MINUTES: int = 0
+
     # Avatar Engine
     AVATAR_ENGINE: str = "musetalk"  # musetalk, simple
     AVATAR_RESOLUTION: int = 512

@@ -14,8 +14,11 @@ from typing import Dict, List, Optional
 from fastapi import WebSocket
 
 from app.config import settings
+from app.services import transcript
 from app.services.animator import avatar_animator
 from app.services.llm import llm_service
+from app.services.moderation import screen_input, screen_output
+from app.services.prompt import load_kiosk_prompt
 from app.services.storage import storage_service
 from app.services.stt import stt_service
 from app.services.tools import TOOL_DEFINITIONS, execute_tool
@@ -166,6 +169,15 @@ class ConnectionManager:
             "last_activity": datetime.now(timezone.utc),
         }
         await self._load_session_data(session_id)
+
+        # Kiosk mode: a configured SYSTEM_PROMPT_FILE overrides any per-avatar
+        # prompt, with {now} date grounding injected at connect time. Explicit
+        # env opt-in — unset, sessions behave exactly as upstream.
+        kiosk_prompt = load_kiosk_prompt()
+        if kiosk_prompt:
+            self.session_data[session_id]["system_prompt"] = kiosk_prompt
+            logger.info(f"Kiosk system prompt applied for session {session_id}")
+
         logger.info(f"WebSocket connected: {session_id} (user={user_id})")
 
     async def _load_session_data(self, session_id: str):
@@ -463,12 +475,49 @@ class ConnectionManager:
 
         task.add_done_callback(_done)
 
+    def _session_limit_reached(self, session_id: str) -> bool:
+        """
+        Guardrail Layer 4 — kiosk session caps. Both limits are 0 (disabled)
+        by default; the kiosk config sets MAX_SESSION_TURNS/MAX_SESSION_MINUTES
+        so a single guest can't monopolize the lobby avatar indefinitely.
+        """
+        data = self.session_data.get(session_id)
+        if not data:
+            return False
+        if settings.MAX_SESSION_TURNS > 0:
+            user_turns = sum(1 for m in data.get("messages", []) if m.get("role") == "user")
+            if user_turns >= settings.MAX_SESSION_TURNS:
+                return True
+        if settings.MAX_SESSION_MINUTES > 0:
+            started = data.get("connected_at")
+            if started is not None:
+                age = (datetime.now(timezone.utc) - started).total_seconds()
+                if age > settings.MAX_SESSION_MINUTES * 60:
+                    return True
+        return False
+
+    async def _reject_over_limit(self, session_id: str) -> bool:
+        """If the session hit a Layer 4 cap: tell the guest, log it, refuse the turn."""
+        if not self._session_limit_reached(session_id):
+            return False
+        await self.send_message(
+            session_id,
+            {
+                "type": "error",
+                "message": "This session has reached its limit — a team member can help you continue.",
+            },
+        )
+        logger.info(f"Session limit reached [{session_id}] — turn rejected")
+        return True
+
     async def handle_audio_input(self, session_id: str, audio_data: str):
         """
         Non-blocking dispatcher: interrupt any prior turn, then run STT +
         the full chat turn inside a tracked task so the WS loop stays free to
         receive the next message (enabling barge-in even mid-transcription).
         """
+        if await self._reject_over_limit(session_id):
+            return
         await self.interrupt_active_turn(session_id)
         self._spawn_turn(session_id, self._handle_audio_inner(session_id, audio_data))
 
@@ -549,6 +598,8 @@ class ConnectionManager:
             )
             return
 
+        if await self._reject_over_limit(session_id):
+            return
         await self.interrupt_active_turn(session_id)
         self._spawn_turn(session_id, self._handle_text_input_inner(session_id, text))
 
@@ -558,6 +609,19 @@ class ConnectionManager:
         try:
             data = self.session_data.get(session_id, {})
             data["last_activity"] = started_at
+
+            # Guardrail Layer 3 hook — input screen, BEFORE the LLM sees the
+            # text. Pass-through in POC; pilot wires the classifier into
+            # moderation.screen_input without touching this call site.
+            mod_in = await screen_input(text)
+            if not mod_in.allowed:
+                await transcript.log_turn(session_id, "user", text, moderation_hit=True)
+                await self.send_message(
+                    session_id,
+                    {"type": "message", "role": "assistant", "content": mod_in.replacement},
+                )
+                return
+
             messages: list[dict] = data.get("messages", [])
             messages.append({"role": "user", "content": text})
 
@@ -571,6 +635,9 @@ class ConnectionManager:
             # Persist the user turn before kicking off generation so it's
             # durable even if the model fails partway through.
             await self._persist_message(session_id, "user", text)
+            # Guardrail Layer 5 — flagged transcript (injection heuristics
+            # run inside log_turn for user turns).
+            await transcript.log_turn(session_id, "user", text)
             # Auto-title the conversation from the first user turn (idempotent)
             await self._ensure_conversation_title(session_id, text)
 
@@ -580,13 +647,17 @@ class ConnectionManager:
 
             # Bounded queue prevents the LLM producer from racing too far ahead
             sentence_queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=4)
+            # Tool calls executed during this turn, for the flagged transcript
+            tool_log: list[dict] = []
 
             # Parent span for the whole turn — child spans (llm.stream,
             # tts.synthesize, avatar.animate, storage.upload) nest under it
             # so a trace shows exactly where a slow turn spent its time.
             with span("chat.turn", **{"input_chars": len(text)}):
                 results = await asyncio.gather(
-                    self._llm_producer(session_id, messages, system_prompt, sentence_queue),
+                    self._llm_producer(
+                        session_id, messages, system_prompt, sentence_queue, tool_log
+                    ),
                     self._animate_from_queue(session_id, sentence_queue),
                     return_exceptions=True,
                 )
@@ -597,6 +668,10 @@ class ConnectionManager:
                     raise r
 
             response_text = results[0] if isinstance(results[0], str) else ""
+            if response_text or tool_log:
+                await transcript.log_turn(
+                    session_id, "assistant", response_text, tool_calls=tool_log
+                )
             if response_text:
                 messages.append({"role": "assistant", "content": response_text})
                 data["messages"] = messages
@@ -615,6 +690,7 @@ class ConnectionManager:
         messages: List[dict],
         system_prompt: Optional[str],
         queue: "asyncio.Queue[Optional[str]]",
+        tool_log: Optional[List[dict]] = None,
     ) -> str:
         """
         Stream LLM tokens, emit `token` events to the frontend, and push
@@ -652,6 +728,10 @@ class ConnectionManager:
                         break  # client disconnected
 
                     if event["type"] == "tool_call":
+                        if tool_log is not None:
+                            tool_log.append(
+                                {"name": event["name"], "arguments": event["arguments"]}
+                            )
                         await self.send_message(
                             session_id,
                             {
@@ -740,6 +820,18 @@ class ConnectionManager:
 
             if session_id not in self.active_connections:
                 break  # client disconnected mid-stream
+
+            # Guardrail Layer 3 hook — output screen, BEFORE TTS. This is the
+            # stop that keeps a jailbroken reply from being spoken on video in
+            # the lobby. Pass-through in POC; the pilot classifier drops in
+            # via moderation.screen_output without touching this call site.
+            mod_out = await screen_output(sentence)
+            if not mod_out.allowed:
+                logger.warning(f"Output chunk blocked by moderation [{session_id}]")
+                await transcript.log_turn(
+                    session_id, "assistant", sentence, moderation_hit=True
+                )
+                continue
 
             job_id = uuid.uuid4().hex[:12]
             session_dir = _private_session_dir(session_id)
