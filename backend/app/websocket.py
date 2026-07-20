@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 from fastapi import WebSocket
 
 from app.config import settings
-from app.services import transcript
+from app.services import livetalk, transcript
 from app.services.animator import avatar_animator
 from app.services.llm import llm_service
 from app.services.moderation import screen_input, screen_output
@@ -165,6 +165,9 @@ class ConnectionManager:
             "language": "en",
             "system_prompt": None,
             "user_id": user_id,
+            # LiveTalking WebRTC sessionid — reported by the client after it
+            # negotiates /offer with the LiveTalking server (engine v2).
+            "livetalk_sessionid": None,
             "connected_at": datetime.now(timezone.utc),
             "last_activity": datetime.now(timezone.utc),
         }
@@ -364,6 +367,11 @@ class ConnectionManager:
         task = self._active_turns.pop(session_id, None)
         if task and not task.done():
             task.cancel()
+            # Engine v2: also flush LiveTalking's speech queue so the stream
+            # stops talking, not just our pipeline.
+            lt_sid = self.session_data.get(session_id, {}).get("livetalk_sessionid")
+            if livetalk.enabled() and lt_sid:
+                asyncio.create_task(livetalk.interrupt(lt_sid))
             # Tell the client to stop playing the queued video chunks too —
             # otherwise they'd keep arriving from the buffer.
             await self.send_message(
@@ -375,6 +383,12 @@ class ConnectionManager:
             )
             return True
         return False
+
+    async def set_livetalk_session(self, session_id: str, lt_sessionid: str) -> None:
+        """Attach the client's LiveTalking WebRTC sessionid to this chat session."""
+        if session_id in self.session_data:
+            self.session_data[session_id]["livetalk_sessionid"] = str(lt_sessionid)
+            logger.info(f"LiveTalking session attached [{session_id}]: {lt_sessionid}")
 
     async def send_message(self, session_id: str, message: dict):
         ws = self.active_connections.get(session_id)
@@ -804,6 +818,29 @@ class ConnectionManager:
         avatar_image = data.get("avatar_image_local")
         speaker_wav: Optional[str] = data.get("voice_wav")
         language: str = data.get("language", "en")
+
+        # ── Engine v2: LiveTalking continuous stream ─────────────────────────
+        # Forward speakable sentences to the LiveTalking server; it does TTS +
+        # real-time lip-sync into the WebRTC stream the browser already holds.
+        # No per-sentence MP4s, no video_chunk events.
+        lt_sid = data.get("livetalk_sessionid")
+        if livetalk.enabled() and lt_sid:
+            while True:
+                sentence = await queue.get()
+                if sentence is None:
+                    break
+                if session_id not in self.active_connections:
+                    break
+                # Layer 3 output screen still applies — same stop, new engine.
+                mod_out = await screen_output(sentence)
+                if not mod_out.allowed:
+                    logger.warning(f"Output chunk blocked by moderation [{session_id}]")
+                    await transcript.log_turn(
+                        session_id, "assistant", sentence, moderation_hit=True
+                    )
+                    continue
+                await livetalk.speak(lt_sid, sentence)
+            return
 
         # If no avatar image, drain queue silently
         if not avatar_image:

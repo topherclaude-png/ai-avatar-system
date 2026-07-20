@@ -13,6 +13,11 @@ import { api, buildSessionWsUrl } from '@/lib/api'
 import { useStore } from '@/store/useStore'
 import type { Avatar, ChatMessage, WsMessage } from '@/lib/types'
 import QrOverlay, { type QrPayment } from './QrOverlay'
+import LiveTalkingView from './LiveTalkingView'
+
+// Engine v2: when set, the avatar is a continuous LiveTalking WebRTC stream
+// instead of per-sentence video chunks.
+const LIVETALKING_URL = process.env.NEXT_PUBLIC_LIVETALKING_URL || ''
 
 const WS_AUTH_REJECT_CODE = 4401  // matches backend close code for auth/ownership failure
 const MAX_WS_RECONNECT_ATTEMPTS = 6
@@ -212,6 +217,10 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
   // call; cleared on dismiss or when the user starts a new turn.
   const [qrPayment, setQrPayment] = useState<QrPayment | null>(null)
 
+  // Engine v2: LiveTalking WebRTC sessionid (reported to the backend so it
+  // can route speakable text to this stream).
+  const ltSessionIdRef = useRef<string | null>(null)
+
   // Chunk queue — managed via refs to avoid stale closures in event handlers
   const chunkQueueRef = useRef<VideoChunk[]>([])
   const isPlayingRef = useRef(false)
@@ -360,6 +369,13 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
       }
       if (voiceId) {
         websocket.send(JSON.stringify({ type: 'set_voice', voice_id: voiceId }))
+      }
+      // Engine v2: if the WebRTC stream negotiated before the chat WS came
+      // up, report the LiveTalking sessionid now so speech routes correctly.
+      if (ltSessionIdRef.current) {
+        websocket.send(
+          JSON.stringify({ type: 'set_livetalk_session', sessionid: ltSessionIdRef.current })
+        )
       }
     }
     websocket.onmessage = (event) => {
@@ -788,6 +804,23 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
           {/* Main display area */}
           <div className="aspect-video w-full bg-surface-950 rounded-xl overflow-hidden relative">
 
+            {LIVETALKING_URL ? (
+              /* ── Engine v2: continuous LiveTalking WebRTC stream ── */
+              <LiveTalkingView
+                serverUrl={LIVETALKING_URL}
+                muted={isMuted}
+                onSessionId={(sid) => {
+                  ltSessionIdRef.current = sid
+                  const sock = wsRef.current
+                  if (sock && sock.readyState === WebSocket.OPEN) {
+                    sock.send(
+                      JSON.stringify({ type: 'set_livetalk_session', sessionid: sid })
+                    )
+                  }
+                }}
+              />
+            ) : (
+              <>
             {/* ── Idle avatar (always mounted, hidden when video plays) ── */}
             <div
               className="absolute inset-0 transition-opacity duration-500"
@@ -807,9 +840,12 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
             />
             {/* Hidden preload video — buffers the next chunk while current plays */}
             <video ref={preloadVideoRef} className="hidden" preload="auto" muted />
+              </>
+            )}
 
-            {/* ── Processing overlay ── */}
-            {isProcessing && (
+            {/* ── Processing overlay (chunked engine only — the stream idles
+                   naturally while thinking) ── */}
+            {!LIVETALKING_URL && isProcessing && (
               <div className="absolute inset-0 bg-surface-950/75 backdrop-blur-sm flex flex-col
                               items-center justify-center gap-4 z-20">
                 <div className="relative">

@@ -59,6 +59,8 @@ const nextConfig = {
     // which reads as "Disconnected" with zero server-side evidence.
     NEXT_PUBLIC_WS_URL:
       process.env.NEXT_PUBLIC_WS_URL || process.env.NEXT_PUBLIC_API_URL || 'ws://localhost:8000',
+    // Engine v2: LiveTalking server base URL (empty = chunked pipeline)
+    NEXT_PUBLIC_LIVETALKING_URL: process.env.NEXT_PUBLIC_LIVETALKING_URL || '',
   },
 };
 

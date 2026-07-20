@@ -372,6 +372,18 @@ async def websocket_endpoint(
                 lang = data.get("language", "en")
                 await websocket_manager.set_language(session_id, lang)
 
+            elif msg_type == "set_livetalk_session":
+                # Client negotiated a WebRTC session with the LiveTalking
+                # server (engine v2) and reports its sessionid so speakable
+                # text can be routed to the right stream.
+                lt_sid = data.get("sessionid")
+                if not lt_sid:
+                    await websocket_manager.send_message(
+                        session_id, {"type": "error", "message": "Missing sessionid"}
+                    )
+                    continue
+                await websocket_manager.set_livetalk_session(session_id, lt_sid)
+
             elif msg_type == "ping":
                 await websocket_manager.send_message(session_id, {"type": "pong"})
 

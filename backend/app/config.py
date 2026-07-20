@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     MAX_SESSION_TURNS: int = 0
     MAX_SESSION_MINUTES: int = 0
 
+    # LiveTalking continuous-stream renderer (engine v2). When set (e.g.
+    # http://localhost:8010), speakable text is forwarded to LiveTalking's
+    # /human API and NO per-sentence MP4 chunks are produced — the browser
+    # holds a WebRTC stream with LiveTalking directly. Empty = classic
+    # chunked pipeline below.
+    LIVETALKING_URL: str = ""
+
     # Avatar Engine
     AVATAR_ENGINE: str = "musetalk"  # musetalk, simple
     AVATAR_RESOLUTION: int = 512
