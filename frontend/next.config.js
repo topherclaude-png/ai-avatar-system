@@ -37,6 +37,20 @@ const nextConfig = {
         : []),
     ],
   },
+  // Next marks prerendered HTML `s-maxage=31536000`; CDN-fronted proxies
+  // (RunPod's Cloudflare layer) then cache the page for a YEAR, so users
+  // keep getting a stale bundle after every rebuild — hard refresh can't
+  // help because the staleness is at the edge, not the browser. Hashed
+  // /_next/static assets keep their own immutable caching (unaffected here);
+  // only the HTML shell must revalidate.
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [{ key: 'Cache-Control', value: 'no-store, must-revalidate' }],
+      },
+    ]
+  },
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
     // Follow the API URL unless a WS endpoint is explicitly set. The old
