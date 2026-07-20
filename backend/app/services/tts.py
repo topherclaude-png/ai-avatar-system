@@ -151,7 +151,32 @@ class TTSService:
             if speaker_wav:
                 kwargs["audio_prompt_path"] = speaker_wav
 
+            # Long-tail babble guard, part 1: calmer sampling. Chatterbox's
+            # defaults (temperature 0.8) frequently hallucinate gibberish past
+            # the end of SHORT sentences, especially with no reference voice.
+            # Only pass knobs this model version actually supports.
+            import inspect
+
+            supported = set(inspect.signature(self.model.generate).parameters)
+            for knob, value in (("temperature", 0.6), ("repetition_penalty", 1.3)):
+                if knob in supported:
+                    kwargs[knob] = value
+
             wav = await asyncio.to_thread(self.model.generate, text, **kwargs)
+
+            # Long-tail babble guard, part 2: hard duration cap from text
+            # length (~12 chars/sec spoken + headroom). A babbling tail wastes
+            # listener patience AND animation time — every extra second is 25
+            # more lip-sync frames downstream.
+            max_secs = len(text) / 12 + 1.5
+            max_samples = int(max_secs * self.model.sr)
+            if wav.shape[-1] > max_samples:
+                logger.info(
+                    f"Trimming long-tail TTS output "
+                    f"{wav.shape[-1] / self.model.sr:.1f}s → {max_secs:.1f}s"
+                )
+                wav = wav[..., :max_samples]
+
             await asyncio.to_thread(torchaudio.save, output_path, wav, self.model.sr)
 
             logger.info(
