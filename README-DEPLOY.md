@@ -39,11 +39,20 @@ git clone https://github.com/topherclaude-png/ai-avatar-system.git
 cd ai-avatar-system
 git checkout poc/tools-and-qr
 
-# Backend deps — KEEP THE POD'S CUDA TORCH. The pinned torch in
-# requirements.txt would replace it with a CPU/mismatched build.
+# Backend deps — KEEP THE POD'S CUDA TORCH (the pinned torch in
+# requirements.txt would replace it with a mismatched build), and work
+# around the chatterbox-tts resolver conflict (0.1.7 demands
+# transformers 5.x; ≤0.1.6 caps numpy below what opencv needs on
+# py3.12). Verified install order:
+python -m venv --system-site-packages /workspace/venv   # venv on the VOLUME
+ln -sfn /workspace/venv backend/venv
+source /workspace/venv/bin/activate
 cd backend
-grep -vE '^(torch|torchvision|torchaudio)==' requirements.txt > /tmp/reqs.txt
+grep -viE '^(torch|torchvision|torchaudio|chatterbox-tts)' requirements.txt \
+  | sed 's/^librosa==0.10.1$/librosa==0.11.0/' > /tmp/reqs.txt
 pip install -r /tmp/reqs.txt
+pip install --no-deps chatterbox-tts==0.1.6
+pip install s3tokenizer resemble-perth conformer
 
 # MuseTalk + weights (~3 GB) — onto the network volume, symlinked in
 mkdir -p /workspace/models
@@ -104,6 +113,10 @@ JWT_SECRET_KEY=<same recipe, different value>
 DATABASE_URL=sqlite+aiosqlite:////workspace/avatar.db
 CORS_ORIGINS=https://<POD_ID>-3000.proxy.runpod.net
 ```
+
+Do NOT add extra keys (e.g. `HF_HOME`) to `.env` — the app's pydantic
+Settings forbid unknown variables and will crash at import. Shell-level
+vars like `HF_HOME=/workspace/hf` go in `~/.bashrc` instead.
 
 Create the DB schema once (sqlite + DEBUG=false skips auto-create):
 
