@@ -43,6 +43,7 @@ export type WsMessageType =
   | 'pong'
   | 'tts_fallback'
   | 'interrupted'
+  | 'tool_call'
 
 // Discriminated union — each WS event has a well-typed payload so the handler
 // can rely on field presence without optional-chaining everywhere.
@@ -58,6 +59,10 @@ export type WsMessage =
   | { type: 'pong' }
   | { type: 'tts_fallback'; engine: string; voice_cloned: boolean; message: string }
   | { type: 'interrupted'; message: string }
+  // Emitted after the backend executes an LLM tool call. The payload mirrors
+  // the executed call: `show_payment_qr` results carry a `payment_url` the
+  // QR overlay renders; `get_events` results are informational (no UI).
+  | { type: 'tool_call'; name: string; arguments: Record<string, unknown>; result: Record<string, unknown> }
 
 export interface VoiceApiResponse {
   id: string

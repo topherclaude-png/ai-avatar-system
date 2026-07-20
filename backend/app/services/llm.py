@@ -21,8 +21,9 @@ appropriate user-facing messages.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional
 
 import anthropic
 import openai
@@ -30,6 +31,11 @@ import openai
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Hard cap on tool-execution rounds within one turn, so a model that keeps
+# requesting tools can't loop forever. After the cap we make one final call
+# with tools disabled to force a spoken answer.
+_MAX_TOOL_ROUNDS = 4
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful AI assistant in a real-time avatar conversation system. "
@@ -262,6 +268,143 @@ class LLMService:
             mapped = _map_openai_exception(e)
             logger.error("openai_stream_failed", extra={"error_type": type(e).__name__})
             raise mapped from e
+
+    # ── streaming with tool calling (OpenAI-compatible path) ────────────────
+
+    async def stream_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        system_prompt: Optional[str] = None,
+        tools: Optional[List[dict]] = None,
+        executor: Optional[Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream a turn with function calling. Yields typed events:
+
+          {"type": "text", "text": <token>}          — spoken-reply token
+          {"type": "tool_call", "name": ..., "arguments": {...}, "result": {...}}
+                                                     — after each executed tool
+
+        The agentic loop runs entirely here: when the model requests tools we
+        execute them via `executor`, append the results, and re-call — up to
+        _MAX_TOOL_ROUNDS, then one forced tool-free call. The caller's
+        `messages` list is never mutated (tool/assistant scaffolding stays
+        internal; the caller owns its own history format).
+
+        Only the OpenAI-compatible provider supports this; on the Anthropic
+        provider (or with no tools/executor) it degrades to plain streaming.
+        """
+        if self.provider != "openai" or not tools or executor is None:
+            if tools and self.provider != "openai":
+                logger.warning(
+                    f"Tool calling requested but provider is '{self.provider}' — "
+                    "streaming without tools (set LLM_PROVIDER=openai/ollama)."
+                )
+            async for token in self.stream_response(messages, system_prompt):
+                yield {"type": "text", "text": token}
+            return
+
+        # Work on a private copy — tool scaffolding must not leak into the
+        # session's conversation history.
+        convo: List[Dict[str, Any]] = list(messages)
+        if system_prompt:
+            convo = [{"role": "system", "content": system_prompt}] + convo
+
+        for round_no in range(_MAX_TOOL_ROUNDS + 1):
+            # Final round: drop tools to force a plain spoken answer.
+            offer_tools = tools if round_no < _MAX_TOOL_ROUNDS else None
+
+            kwargs: dict = {
+                "model": self.model,
+                "messages": convo,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "stream": True,
+            }
+            if offer_tools:
+                kwargs["tools"] = offer_tools
+
+            content = ""
+            # index → {"id", "name", "arguments"} accumulated from deltas
+            pending: Dict[int, Dict[str, str]] = {}
+            finish_reason: Optional[str] = None
+
+            try:
+                stream = await self.client.chat.completions.create(**kwargs)
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+
+                    if delta and delta.content:
+                        content += delta.content
+                        yield {"type": "text", "text": delta.content}
+
+                    if delta and delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            slot = pending.setdefault(
+                                tc.index, {"id": "", "name": "", "arguments": ""}
+                            )
+                            if tc.id:
+                                slot["id"] = tc.id
+                            if tc.function and tc.function.name:
+                                slot["name"] = tc.function.name
+                            if tc.function and tc.function.arguments:
+                                slot["arguments"] += tc.function.arguments
+
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
+            except Exception as e:
+                mapped = _map_openai_exception(e)
+                logger.error("openai_tool_stream_failed", extra={"error_type": type(e).__name__})
+                raise mapped from e
+
+            if finish_reason != "tool_calls" or not pending:
+                return  # plain answer — turn complete
+
+            # Model requested tools: record its request, execute each, append
+            # results, and loop for the follow-up call.
+            calls = [pending[i] for i in sorted(pending)]
+            convo.append(
+                {
+                    "role": "assistant",
+                    "content": content or None,
+                    "tool_calls": [
+                        {
+                            "id": c["id"] or f"call_{i}",
+                            "type": "function",
+                            "function": {"name": c["name"], "arguments": c["arguments"] or "{}"},
+                        }
+                        for i, c in enumerate(calls)
+                    ],
+                }
+            )
+            for i, call in enumerate(calls):
+                try:
+                    arguments = json.loads(call["arguments"] or "{}")
+                    if not isinstance(arguments, dict):
+                        arguments = {}
+                except json.JSONDecodeError:
+                    arguments = {}
+                result = await executor(call["name"], arguments)
+                logger.info(
+                    "tool_executed",
+                    extra={"tool": call["name"], "round": round_no},
+                )
+                yield {
+                    "type": "tool_call",
+                    "name": call["name"],
+                    "arguments": arguments,
+                    "result": result,
+                }
+                convo.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"] or f"call_{i}",
+                        "content": json.dumps(result),
+                    }
+                )
 
     # ── helpers ──────────────────────────────────────────────────────────────
 

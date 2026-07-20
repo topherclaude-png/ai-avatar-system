@@ -63,6 +63,20 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.7
     LLM_MAX_TOKENS: int = 2000
 
+    # Tool calling (You42 kiosk: get_events / show_payment_qr).
+    # Only the OpenAI-compatible provider path supports tools; with
+    # LLM_PROVIDER=anthropic the pipeline logs a warning and streams
+    # without tools. Disable entirely for endpoints that reject the
+    # `tools` parameter.
+    TOOLS_ENABLED: bool = True
+    # Local events table (POC fallback for Eventbrite; pilot syncs this
+    # file hourly via n8n). The start_date >= now filter lives in the tool
+    # handler, not here and not in the prompt.
+    EVENTS_FILE: str = "data/events.json"
+    # Stub payment URL base for show_payment_qr — any https link the
+    # frontend can render as a QR. Replaced by real checkout links post-POC.
+    PAYMENT_URL_STUB: str = "https://you42.example.com/pay"
+
     # Avatar Engine
     AVATAR_ENGINE: str = "musetalk"  # musetalk, simple
     AVATAR_RESOLUTION: int = 512

@@ -13,10 +13,12 @@ from typing import Dict, List, Optional
 
 from fastapi import WebSocket
 
+from app.config import settings
 from app.services.animator import avatar_animator
 from app.services.llm import llm_service
 from app.services.storage import storage_service
 from app.services.stt import stt_service
+from app.services.tools import TOOL_DEFINITIONS, execute_tool
 from app.services.tts import tts_service
 from app.telemetry import span
 
@@ -627,12 +629,41 @@ class ConnectionManager:
         full_text = ""
         first_chunk_sent = False
 
-        try:
-            with span("llm.stream", **{"history_len": len(messages)}):
+        # Tool calling rides the same token stream: `stream_with_tools`
+        # yields text events (identical handling to before) plus tool_call
+        # events, which we forward to the frontend verbatim — that's how the
+        # QR overlay learns a `show_payment_qr` call happened.
+        use_tools = settings.TOOLS_ENABLED
+
+        async def _events():
+            if use_tools:
+                async for ev in llm_service.stream_with_tools(
+                    messages, system_prompt, tools=TOOL_DEFINITIONS, executor=execute_tool
+                ):
+                    yield ev
+            else:
                 async for token in llm_service.stream_response(messages, system_prompt):
+                    yield {"type": "text", "text": token}
+
+        try:
+            with span("llm.stream", **{"history_len": len(messages), "tools": use_tools}):
+                async for event in _events():
                     if session_id not in self.active_connections:
                         break  # client disconnected
 
+                    if event["type"] == "tool_call":
+                        await self.send_message(
+                            session_id,
+                            {
+                                "type": "tool_call",
+                                "name": event["name"],
+                                "arguments": event["arguments"],
+                                "result": event["result"],
+                            },
+                        )
+                        continue
+
+                    token = event["text"]
                     full_text += token
                     buf += token
 

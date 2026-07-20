@@ -12,6 +12,7 @@ import { toast } from 'react-hot-toast'
 import { api, buildSessionWsUrl } from '@/lib/api'
 import { useStore } from '@/store/useStore'
 import type { Avatar, ChatMessage, WsMessage } from '@/lib/types'
+import QrOverlay, { type QrPayment } from './QrOverlay'
 
 const WS_AUTH_REJECT_CODE = 4401  // matches backend close code for auth/ownership failure
 const MAX_WS_RECONNECT_ATTEMPTS = 6
@@ -206,6 +207,10 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
   // Video playback state
   const [showVideo, setShowVideo] = useState(false)           // true while a chunk is playing
   const [currentChunkProgress, setCurrentChunkProgress] = useState({ current: 0, total: 0 })
+
+  // Payment QR overlay — set when the LLM fires a `show_payment_qr` tool
+  // call; cleared on dismiss or when the user starts a new turn.
+  const [qrPayment, setQrPayment] = useState<QrPayment | null>(null)
 
   // Chunk queue — managed via refs to avoid stale closures in event handlers
   const chunkQueueRef = useRef<VideoChunk[]>([])
@@ -493,6 +498,18 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
         setStreamingContent('')
         break
 
+      case 'tool_call':
+        // Backend executed an LLM tool. `show_payment_qr` drives the QR
+        // overlay; other tools (get_events) have no direct UI.
+        if (data.name === 'show_payment_qr' && typeof data.result?.payment_url === 'string') {
+          setQrPayment({
+            paymentUrl: data.result.payment_url,
+            eventId: typeof data.result.event_id === 'string' ? data.result.event_id : undefined,
+            price: typeof data.result.price === 'number' ? data.result.price : undefined,
+          })
+        }
+        break
+
       case 'pong':
         break
     }
@@ -506,6 +523,7 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
       return
     }
     const emotion = detectEmotion(inputText)
+    setQrPayment(null) // new turn — last turn's payment QR is stale
     ws.send(JSON.stringify({ type: 'text', text: inputText }))
     setMessages(prev => [...prev, {
       id: Date.now().toString(),
@@ -597,6 +615,7 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
           if (ws && ws.readyState === WebSocket.OPEN) {
             setLatencyMs(null)
             sendTimeRef.current = Date.now()
+            setQrPayment(null) // new turn — last turn's payment QR is stale
             ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }))
             setIsProcessing(true)
             chunkQueueRef.current = []
@@ -801,6 +820,11 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                 </div>
                 <p className="text-sm text-gray-300 font-medium animate-pulse">{statusMsg}</p>
               </div>
+            )}
+
+            {/* ── Payment QR overlay (from a show_payment_qr tool call) ── */}
+            {qrPayment && (
+              <QrOverlay payment={qrPayment} onDismiss={() => setQrPayment(null)} />
             )}
 
             {/* ── Chunk progress badge (shows while more chunks are coming) ── */}

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "ev-cohort-showcase",
+    "title": "Creator Cohort Showcase Night",
+    "start_date": "2026-08-07T19:00:00-05:00",
+    "venue": "You42 Main Stage",
+    "price": 15,
+    "description": "Live showcase from the current Creator Cohort — music, film screenings, and live podcast tapings."
+  },
+  {
+    "id": "ev-open-studio",
+    "title": "Open Studio Saturday",
+    "start_date": "2026-08-15T11:00:00-05:00",
+    "venue": "You42 Micro-Studios",
+    "price": 0,
+    "description": "Free walk-through of the micro-studios with hands-on demos of the recording and streaming setups."
+  },
+  {
+    "id": "ev-trivia-past",
+    "title": "Trivia Night (June)",
+    "start_date": "2026-06-12T19:00:00-05:00",
+    "venue": "You42 Lounge",
+    "price": 5,
+    "description": "PAST EVENT — exists in this table to verify the server-side date filter excludes it."
+  }
+]
