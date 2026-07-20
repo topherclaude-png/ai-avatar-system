@@ -38,6 +38,10 @@ class AvatarAnimator:
         self._worker_proc: Optional[asyncio.subprocess.Process] = None
         self._worker_lock = asyncio.Lock()
         self._worker_env: dict = {}
+        # Templates the current worker process has already prepared. First
+        # job per template pays one-time prep (video frame extraction +
+        # landmarks + VAE) and gets a long timeout; later jobs are fast.
+        self._prepared_templates: set = set()
 
         if self.device == "cuda":
             gpu_name = torch.cuda.get_device_name(0)
@@ -130,6 +134,8 @@ class AvatarAnimator:
         worker_script = self._resolve_worker_script(musetalk_dir)
 
         logger.info("Starting persistent MuseTalk worker (loading models once)…")
+        # Fresh process → its in-memory template prep is empty again.
+        self._prepared_templates.clear()
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             str(worker_script),
@@ -206,8 +212,16 @@ class AvatarAnimator:
                 self._worker_proc = None
                 raise RuntimeError(f"MuseTalk worker pipe is dead: {e}") from e
 
-            # GPU: expect ~5-15s per sentence; CPU: up to 5 min
-            infer_timeout = 60 if self.device == "cuda" else 300
+            # GPU: expect ~5-15s per sentence; CPU: up to 5 min. The FIRST job
+            # per template additionally pays one-time prep — for a video
+            # template that's frame extraction + per-frame landmarks + VAE,
+            # which can take minutes — so it gets a much longer allowance.
+            template_key = str(Path(image_path).resolve())
+            first_job = template_key not in self._prepared_templates
+            if self.device == "cuda":
+                infer_timeout = 300 if first_job else 60
+            else:
+                infer_timeout = 900 if first_job else 300
             try:
                 result_line = await asyncio.wait_for(proc.stdout.readline(), timeout=infer_timeout)
             except asyncio.TimeoutError:
@@ -226,6 +240,7 @@ class AvatarAnimator:
             if result["status"] != "ok":
                 raise RuntimeError(result.get("msg", "Unknown worker error"))
 
+            self._prepared_templates.add(template_key)
             return output_path
 
     # ── public API ────────────────────────────────────────────────────────────
@@ -285,22 +300,27 @@ class AvatarAnimator:
         audio_path: str,
         output_path: str,
     ) -> str:
-        """Combine static image + audio with FFmpeg. No lip-sync."""
-        logger.info("Using simple animation (static image + audio, no lip-sync)")
+        """Combine template (image or looped video) + audio with FFmpeg. No lip-sync."""
+        logger.info("Using simple animation (template + audio, no lip-sync)")
+
+        is_video = Path(avatar_path).suffix.lower() in {".mp4", ".mov", ".webm", ".avi", ".mkv"}
+        # Image templates loop via the image demuxer; video templates loop the
+        # whole clip (-stream_loop -1) and -shortest trims to the audio.
+        input_args = (
+            ["-stream_loop", "-1", "-i", str(avatar_path)]
+            if is_video
+            else ["-loop", "1", "-i", str(avatar_path)]
+        )
 
         cmd = [
             "ffmpeg",
             "-y",
-            "-loop",
-            "1",
-            "-i",
-            str(avatar_path),
+            *input_args,
             "-i",
             str(audio_path),
             "-c:v",
             "libx264",
-            "-tune",
-            "stillimage",
+            *([] if is_video else ["-tune", "stillimage"]),
             "-c:a",
             "aac",
             "-b:a",

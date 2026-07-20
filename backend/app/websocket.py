@@ -286,8 +286,15 @@ class ConnectionManager:
         return None
 
     async def _resolve_local_image(self, avatar) -> str:
-        """Return a local FS path to the avatar image, downloading from S3 if needed."""
-        cache_path = TMPDIR / "avatars" / f"{avatar.id}.jpg"
+        """
+        Return a local FS path to the avatar template (image or video),
+        downloading from S3 if needed. The suffix is preserved from the
+        stored key — the animator worker detects video templates by
+        extension, so caching an .mp4 under a .jpg name would silently
+        demote it to a broken still.
+        """
+        suffix = Path(avatar.s3_key or "").suffix.lower() or ".jpg"
+        cache_path = TMPDIR / "avatars" / f"{avatar.id}{suffix}"
         if cache_path.exists():
             return str(cache_path)
 

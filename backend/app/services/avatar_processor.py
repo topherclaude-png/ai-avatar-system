@@ -94,6 +94,62 @@ class AvatarProcessor:
             logger.error(f"Failed to process avatar image: {e}")
             raise
 
+    async def process_video(self, video_path: str, thumbnail_path: str) -> Tuple[str, dict]:
+        """
+        Validate an uploaded video template and derive a thumbnail from its
+        first frame. Unlike images, the video itself is stored UNMODIFIED —
+        the MuseTalk worker extracts/scales frames at its own fps, so any
+        re-encode here would just cost quality.
+
+        Returns (thumbnail_path, metadata). Raises ValueError on anything
+        that isn't a readable video.
+        """
+        logger.info(f"Processing avatar video template: {video_path}")
+
+        cap = cv2.VideoCapture(video_path)
+        try:
+            if not cap.isOpened():
+                raise ValueError("File is not a readable video")
+
+            fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            duration = (frame_count / fps) if fps > 0 else 0.0
+
+            ok, first_frame = cap.read()
+            if not ok or first_frame is None:
+                raise ValueError("Could not decode the first video frame")
+        finally:
+            cap.release()
+
+        # Face check on the first frame — warn-only (same policy as images):
+        # a template the face tracker can't use fails loudly at animation
+        # time anyway, and lighting can defeat the cheap Haar check.
+        rgb = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
+        face_box = await self._detect_face(rgb)
+        if face_box is None:
+            logger.warning("No face detected in video template's first frame")
+
+        thumb = Image.fromarray(rgb)
+        thumb.thumbnail((256, 256), Image.Resampling.LANCZOS)
+        Path(thumbnail_path).parent.mkdir(parents=True, exist_ok=True)
+        thumb.save(thumbnail_path, quality=85)
+
+        metadata = {
+            "is_video_template": True,
+            "duration_seconds": round(duration, 2),
+            "fps": round(fps, 2),
+            "original_size": (width, height),
+            "face_detected": face_box is not None,
+            "thumbnail_path": thumbnail_path,
+        }
+        logger.info(
+            f"Video template ok: {duration:.1f}s @ {fps:.0f}fps {width}x{height}, "
+            f"face={'yes' if face_box else 'no'}"
+        )
+        return thumbnail_path, metadata
+
     async def _detect_face(self, image: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """Detect face in image using OpenCV"""
         try:

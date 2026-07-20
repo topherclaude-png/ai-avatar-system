@@ -45,16 +45,32 @@ async def upload_avatar(
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user),
 ):
-    """Upload and process an avatar image."""
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image (JPG, PNG, WEBP)")
+    """
+    Upload and process an avatar template.
+
+    Accepts a still image (JPG/PNG/WEBP — processed, face-cropped, resized)
+    OR a short video clip (MP4/MOV/WEBM — stored as-is; the MuseTalk worker
+    uses it as the idle/motion template and a thumbnail is taken from the
+    first frame). A ~10-second, well-lit frontal clip gives natural idle
+    motion that a still photo cannot.
+    """
+    is_video = bool(file.content_type) and file.content_type.startswith("video/")
+    if not file.content_type or not (file.content_type.startswith("image/") or is_video):
+        raise HTTPException(
+            status_code=400,
+            detail="File must be an image (JPG, PNG, WEBP) or video (MP4, MOV, WEBM)",
+        )
 
     file_data: bytes = await file.read()  # type: ignore[assignment]
-    if len(file_data) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File must be under 10 MB")
+    max_bytes = (50 if is_video else 10) * 1024 * 1024
+    if len(file_data) > max_bytes:
+        raise HTTPException(
+            status_code=400, detail=f"File must be under {50 if is_video else 10} MB"
+        )
 
     avatar_id = str(uuid.uuid4())
-    suffix = Path(file.filename or "avatar.jpg").suffix or ".jpg"
+    default_name = "avatar.mp4" if is_video else "avatar.jpg"
+    suffix = (Path(file.filename or default_name).suffix or Path(default_name).suffix).lower()
     temp_orig = TMPDIR / f"{avatar_id}_original{suffix}"
     temp_processed = TMPDIR / f"{avatar_id}_processed.jpg"
     metadata: dict = {}
@@ -62,12 +78,36 @@ async def upload_avatar(
     try:
         temp_orig.write_bytes(file_data)
 
-        _, metadata = await avatar_processor.process_image(str(temp_orig), str(temp_processed))
-
-        image_key = f"avatars/{avatar_id}/image.jpg"
-        image_url = await storage_service.upload_file(
-            temp_processed.read_bytes(), image_key, content_type="image/jpeg"
-        )
+        if is_video:
+            # Video template: validate + first-frame thumbnail; the clip
+            # itself is stored unmodified for the animator.
+            _, metadata = await avatar_processor.process_video(
+                str(temp_orig), str(temp_processed)
+            )
+            duration = metadata.get("duration_seconds") or 0
+            if duration > 60:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Video template must be 60 seconds or shorter (~10s is ideal)",
+                )
+            image_key = f"avatars/{avatar_id}/template{suffix}"
+            await storage_service.upload_file(
+                file_data, image_key, content_type=file.content_type
+            )
+            # image_url must stay displayable in the UI — use the thumbnail.
+            image_url = await storage_service.upload_file(
+                temp_processed.read_bytes(),
+                f"avatars/{avatar_id}/image.jpg",
+                content_type="image/jpeg",
+            )
+        else:
+            _, metadata = await avatar_processor.process_image(
+                str(temp_orig), str(temp_processed)
+            )
+            image_key = f"avatars/{avatar_id}/image.jpg"
+            image_url = await storage_service.upload_file(
+                temp_processed.read_bytes(), image_key, content_type="image/jpeg"
+            )
 
         # Resolve the thumbnail path defensively: an empty/missing value would
         # make Path("") == Path(".") (the cwd), so guard against it explicitly
@@ -89,11 +129,12 @@ async def upload_avatar(
     except Exception as e:
         from PIL import UnidentifiedImageError
 
-        if isinstance(e, UnidentifiedImageError):
-            # Client sent something that isn't a decodable image — their
+        if isinstance(e, (UnidentifiedImageError, ValueError)):
+            # Client sent something that isn't decodable media — their
             # fault, not ours.
             raise HTTPException(
-                status_code=400, detail="File is not a valid image (JPG, PNG, WEBP)"
+                status_code=400,
+                detail="File is not valid media (JPG, PNG, WEBP, MP4, MOV, WEBM)",
             )
         logger.error(f"Avatar processing error: {e}")
         raise HTTPException(status_code=500, detail="Failed to process avatar")
