@@ -146,37 +146,54 @@ class AvatarAnimator:
             env=self._worker_env,
         )
 
-        # Send init config — include float16 flag so worker can optimise for GPU
-        init_msg = (
-            json.dumps(
-                {
-                    "unet_model_path": str(musetalk_dir / "models" / "musetalkV15" / "unet.pth"),
-                    "unet_config": str(musetalk_dir / "models" / "musetalkV15" / "musetalk.json"),
-                    "whisper_dir": str(musetalk_dir / "models" / "whisper"),
-                    "vae_type": str(musetalk_dir / "models" / "sd-vae"),
-                    "use_float16": self.use_float16,
-                }
-            )
-            + "\n"
-        )
-        proc.stdin.write(init_msg.encode())
-        await proc.stdin.drain()
-
-        # Wait for READY — GPU loads much faster (~60s) vs CPU (~5-10 min first time)
-        model_load_timeout = 120 if self.device == "cuda" else 600
-        logger.info(f"Waiting for worker to finish loading models (timeout={model_load_timeout}s)…")
         try:
-            ready_line = await asyncio.wait_for(proc.stdout.readline(), timeout=model_load_timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise RuntimeError("MuseTalk worker timed out while loading models")
-
-        if not ready_line.decode().strip().startswith("READY"):
-            stderr_out = await proc.stderr.read()
-            proc.kill()
-            raise RuntimeError(
-                f"Worker failed to start. stderr:\n{stderr_out.decode(errors='replace')}"
+            # Send init config — include float16 flag so worker can optimise for GPU
+            init_msg = (
+                json.dumps(
+                    {
+                        "unet_model_path": str(
+                            musetalk_dir / "models" / "musetalkV15" / "unet.pth"
+                        ),
+                        "unet_config": str(
+                            musetalk_dir / "models" / "musetalkV15" / "musetalk.json"
+                        ),
+                        "whisper_dir": str(musetalk_dir / "models" / "whisper"),
+                        "vae_type": str(musetalk_dir / "models" / "sd-vae"),
+                        "use_float16": self.use_float16,
+                    }
+                )
+                + "\n"
             )
+            proc.stdin.write(init_msg.encode())
+            await proc.stdin.drain()
+
+            # Wait for READY. Generous budgets: weights often live on a NETWORK
+            # volume (RunPod), where reading ~5 GB can alone take minutes — a
+            # tight timeout kills a worker that was loading fine and the next
+            # turn starts the churn all over again.
+            model_load_timeout = 420 if self.device == "cuda" else 900
+            logger.info(
+                f"Waiting for worker to finish loading models (timeout={model_load_timeout}s)…"
+            )
+            try:
+                ready_line = await asyncio.wait_for(
+                    proc.stdout.readline(), timeout=model_load_timeout
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError("MuseTalk worker timed out while loading models")
+
+            if not ready_line.decode().strip().startswith("READY"):
+                stderr_out = await proc.stderr.read()
+                raise RuntimeError(
+                    f"Worker failed to start. stderr:\n{stderr_out.decode(errors='replace')}"
+                )
+        except BaseException:
+            # Covers errors AND cancellation (barge-in lands here when a fresh
+            # user input cancels the turn mid-spawn). Without this, a
+            # cancelled spawn ORPHANS a model-loading process — the next turn
+            # then starts a second worker and VRAM fills up with zombies.
+            proc.kill()
+            raise
 
         logger.info("MuseTalk worker ready — models loaded")
         self._worker_proc = proc
