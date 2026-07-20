@@ -288,11 +288,14 @@ def main():
             job = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        job_id = job.get("job_id")
         try:
             _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device)
-            _reply({"status": "ok", "output": job["output"]})
+            _reply({"status": "ok", "output": job["output"], "job_id": job_id})
         except Exception as e:
-            _reply({"status": "error", "msg": str(e), "tb": traceback.format_exc()})
+            _reply(
+                {"status": "error", "msg": str(e), "tb": traceback.format_exc(), "job_id": job_id}
+            )
 
 
 if __name__ == "__main__":

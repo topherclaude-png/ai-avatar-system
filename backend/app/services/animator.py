@@ -105,16 +105,21 @@ class AvatarAnimator:
         clone, so its `from musetalk.utils …` imports resolve regardless of
         where the script file physically lives.
         """
-        in_clone = musetalk_dir / "scripts" / "musetalk_worker.py"
-        if in_clone.exists():
-            return in_clone
+        # Prefer the TRACKED copy: the clone copy is a snapshot made by
+        # setup_musetalk.sh and silently goes stale when the repo's worker is
+        # updated without re-running setup — a `git pull` then deploys old
+        # worker code. The clone copy remains a fallback for layouts where
+        # the backend tree isn't present.
         # backend/app/services/animator.py → backend/musetalk_worker.py
         tracked = Path(__file__).resolve().parent.parent.parent / "musetalk_worker.py"
         if tracked.exists():
-            logger.info(f"Using tracked MuseTalk worker at {tracked}")
             return tracked
+        in_clone = musetalk_dir / "scripts" / "musetalk_worker.py"
+        if in_clone.exists():
+            logger.info(f"Using in-clone MuseTalk worker at {in_clone}")
+            return in_clone
         raise FileNotFoundError(
-            f"musetalk_worker.py not found in {in_clone} or {tracked}. "
+            f"musetalk_worker.py not found in {tracked} or {in_clone}. "
             "Re-run scripts/setup_musetalk.sh."
         )
 
@@ -251,12 +256,21 @@ class AvatarAnimator:
         self, image_path: str, audio_path: str, output_path: str, coord_cache: Optional[str]
     ) -> str:
         """Send one job to the persistent worker and await its result."""
+        import uuid as _uuid
+
         async with self._worker_lock:
             proc = await self._ensure_worker()
 
+            # Correlation id: if a previous caller was cancelled mid-job
+            # (barge-in, session teardown), the worker's reply for THAT job
+            # is still in the pipe — without ids, the next job would consume
+            # the stale reply as its own result (observed live: a dead
+            # session's error surfaced as the next session's failure).
+            job_id = _uuid.uuid4().hex[:12]
             job = (
                 json.dumps(
                     {
+                        "job_id": job_id,
                         "image": str(Path(image_path).resolve()),
                         "audio": str(Path(audio_path).resolve()),
                         "output": str(Path(output_path).resolve()),
@@ -288,7 +302,20 @@ class AvatarAnimator:
             else:
                 infer_timeout = 900 if first_job else 300
             try:
-                result = await self._await_worker_line(proc, infer_timeout, ready=False)
+                # Discard stale replies from cancelled predecessors until OUR
+                # job id comes back (bounded by the same overall deadline).
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + infer_timeout
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    result = await self._await_worker_line(proc, remaining, ready=False)
+                    if result.get("job_id") in (job_id, None):
+                        break
+                    logger.warning(
+                        f"Discarding stale worker reply for job {result.get('job_id')}"
+                    )
             except asyncio.TimeoutError:
                 proc.kill()
                 self._worker_proc = None

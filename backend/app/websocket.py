@@ -318,6 +318,14 @@ class ConnectionManager:
         task = self._active_turns.pop(session_id, None)
         if task and not task.done():
             task.cancel()
+            # Give the cancelled turn a moment to actually unwind before we
+            # rm -rf its session dir below — wiping the dir while the
+            # animation stage still references files inside it made in-flight
+            # worker jobs fail on vanished paths (observed live).
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
 
         ws = self.active_connections.pop(session_id, None)
         self.session_data.pop(session_id, None)
