@@ -60,6 +60,27 @@ async def speak(sessionid: str, text: str, interrupt: bool = False) -> bool:
         return False
 
 
+async def speak_audio(sessionid: str, wav_bytes: bytes) -> bool:
+    """
+    Push pre-synthesized speech audio for lip-sync (POST /humanaudio,
+    multipart). Used for the CLONED voice: our Chatterbox synthesizes with
+    the guest-facing voice profile and LiveTalking only does the lip-sync
+    (it resamples internally, any WAV rate is fine).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            r = await client.post(
+                f"{_base()}/humanaudio",
+                data={"sessionid": sessionid},
+                files={"file": ("speech.wav", wav_bytes, "audio/wav")},
+            )
+            r.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error(f"LiveTalking speak_audio failed [{sessionid}]: {e}")
+        return False
+
+
 async def interrupt(sessionid: str) -> bool:
     """Barge-in: flush anything queued or being spoken."""
     try:

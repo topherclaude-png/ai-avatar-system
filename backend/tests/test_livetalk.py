@@ -163,6 +163,55 @@ async def test_consumer_uses_chunk_pipeline_without_lt_session(monkeypatch):
     assert called == []  # nothing forwarded
 
 
+async def test_consumer_pushes_cloned_audio_when_voice_set(monkeypatch, tmp_path):
+    """With a voice profile attached, sentences are synthesized locally
+    (cloned voice) and pushed as AUDIO via /humanaudio, not as text."""
+    from app import websocket as wsmod
+    from app.services.tts import SynthResult
+
+    monkeypatch.setattr(settings, "LIVETALKING_URL", "http://lt:8010")
+    monkeypatch.setattr(wsmod, "TMPDIR", tmp_path)
+
+    manager = wsmod.ConnectionManager()
+    session_id = "sess-clone"
+    manager.active_connections[session_id] = object()
+    manager.session_data[session_id] = {
+        "livetalk_sessionid": "lt-7",
+        "voice_wav": str(tmp_path / "ref.wav"),
+        "language": "en",
+    }
+
+    async def fake_synth(text, output_path, speaker_wav=None, language="en"):
+        from pathlib import Path
+
+        Path(output_path).write_bytes(b"RIFFcloned-wav")
+        return SynthResult(
+            output_path=output_path, engine="chatterbox", fallback=False, voice_cloned=True
+        )
+
+    audio_pushed, text_pushed = [], []
+
+    async def fake_speak_audio(sid, wav_bytes):
+        audio_pushed.append((sid, wav_bytes))
+        return True
+
+    async def fake_speak(sid, text, interrupt=False):
+        text_pushed.append(text)
+        return True
+
+    monkeypatch.setattr(wsmod.tts_service, "synthesize", fake_synth)
+    monkeypatch.setattr(wsmod.livetalk, "speak_audio", fake_speak_audio)
+    monkeypatch.setattr(wsmod.livetalk, "speak", fake_speak)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait("Cloned sentence.")
+    queue.put_nowait(None)
+    await manager._animate_from_queue(session_id, queue)
+
+    assert audio_pushed == [("lt-7", b"RIFFcloned-wav")]
+    assert text_pushed == []  # audio path used, not text
+
+
 # ── interrupt fan-out + sessionid attach ─────────────────────────────────────
 
 

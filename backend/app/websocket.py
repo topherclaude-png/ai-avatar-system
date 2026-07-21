@@ -839,7 +839,32 @@ class ConnectionManager:
                         session_id, "assistant", sentence, moderation_hit=True
                     )
                     continue
-                await livetalk.speak(lt_sid, sentence)
+
+                # Cloned voice: synthesize locally (Chatterbox + the session's
+                # voice profile) and push AUDIO for lip-sync. No profile →
+                # push text and let LiveTalking's own TTS speak it.
+                if speaker_wav:
+                    tmp_wav = _private_session_dir(session_id) / f"{uuid.uuid4().hex[:12]}_lt.wav"
+                    try:
+                        synth = await tts_service.synthesize(
+                            text=sentence,
+                            output_path=str(tmp_wav),
+                            speaker_wav=speaker_wav,
+                            language=language,
+                        )
+                        if synth.voice_cloned:
+                            await livetalk.speak_audio(lt_sid, tmp_wav.read_bytes())
+                        else:
+                            # Clone failed (fallback voice) — LiveTalking's own
+                            # TTS sounds better than gTTS; send text instead.
+                            await livetalk.speak(lt_sid, sentence)
+                    except Exception as e:
+                        logger.error(f"Cloned-voice synth failed [{session_id}]: {e}")
+                        await livetalk.speak(lt_sid, sentence)
+                    finally:
+                        tmp_wav.unlink(missing_ok=True)
+                else:
+                    await livetalk.speak(lt_sid, sentence)
             return
 
         # If no avatar image, drain queue silently
