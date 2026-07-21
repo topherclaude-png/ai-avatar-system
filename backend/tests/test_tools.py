@@ -65,6 +65,30 @@ def test_end_date_narrows_window(events_file):
     assert ids == ["soon"]
 
 
+def test_date_only_end_includes_that_whole_day(events_file, monkeypatch):
+    """Asking for events 'on' a specific date must include events that day —
+    even when their timezone offset pushes them past midnight UTC (observed
+    live: Aug 7 19:00-05:00 event = Aug 8 UTC, excluded by a naive window)."""
+    import json as _json
+
+    tz_events = [
+        {
+            "id": "evening-tz",
+            "title": "Evening Event",
+            "start_date": "2026-08-07T19:00:00-05:00",  # Aug 8, 00:00 UTC
+            "price": 15,
+        }
+    ]
+    events_file.write_text(_json.dumps(tz_events), encoding="utf-8")
+
+    result = get_events(start_date="2026-08-07", end_date="2026-08-07", _now=NOW)
+    assert [e["id"] for e in result["events"]] == ["evening-tz"]
+
+    # Explicit datetime ends stay exact (no silent day extension).
+    result = get_events(end_date="2026-08-07T12:00:00+00:00", _now=NOW)
+    assert result["events"] == []
+
+
 def test_future_start_date_is_respected(events_file):
     result = get_events(start_date="2026-09-01", _now=NOW)
     ids = [e["id"] for e in result["events"]]

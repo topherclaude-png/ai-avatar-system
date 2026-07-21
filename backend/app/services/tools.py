@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -128,6 +128,13 @@ def get_events(
     if window_start is None or window_start < now:
         window_start = now  # clamp: the past is never queryable
     window_end = _parse_iso_date(end_date)
+    # A date-only end (no time component) means "through the END of that
+    # day". Parsed as midnight it EXCLUDES same-day events — and with
+    # timezone offsets even excludes them in UTC terms (observed live: an
+    # Aug 7 19:00-05:00 event is Aug 8 in UTC; asking for Aug 7 → "no
+    # events"). Extend by one day to make the window inclusive.
+    if window_end is not None and isinstance(end_date, str) and "T" not in end_date:
+        window_end += timedelta(days=1)
 
     events = []
     for ev in _load_events_table():
