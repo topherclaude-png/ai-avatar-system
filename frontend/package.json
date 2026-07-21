@@ -7,9 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/copy-vad-assets.js"
   },
   "dependencies": {
+    "@ricky0123/vad-web": "^0.0.30",
     "@tanstack/react-query": "^5.17.19",
     "axios": "^1.6.5",
     "clsx": "^2.1.0",

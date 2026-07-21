@@ -102,3 +102,4 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+frontend/public/vad/

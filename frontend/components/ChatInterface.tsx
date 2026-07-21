@@ -221,6 +221,61 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
   // can route speakable text to this stream).
   const ltSessionIdRef = useRef<string | null>(null)
 
+  // Hands-free mode: continuous mic with in-browser Silero VAD. Speech start
+  // fires a barge-in; speech end auto-sends the utterance as WAV. No taps.
+  const [handsFree, setHandsFree] = useState(false)
+  const [vadSpeaking, setVadSpeaking] = useState(false)
+  const vadRef = useRef<{ destroy: () => void; start: () => void } | null>(null)
+
+  const toggleHandsFree = useCallback(async () => {
+    if (vadRef.current) {
+      vadRef.current.destroy()
+      vadRef.current = null
+      setHandsFree(false)
+      setVadSpeaking(false)
+      return
+    }
+    try {
+      const { MicVAD, utils } = await import('@ricky0123/vad-web')
+      const vad = await MicVAD.new({
+        baseAssetPath: '/vad/',
+        onnxWASMBasePath: '/vad/',
+        onSpeechStart: () => {
+          setVadSpeaking(true)
+          // Barge-in the moment the guest starts talking — don't wait for
+          // the utterance to finish. Backend no-ops if nothing is playing.
+          const sock = wsRef.current
+          if (sock && sock.readyState === WebSocket.OPEN) {
+            sock.send(JSON.stringify({ type: 'stop' }))
+          }
+        },
+        onSpeechEnd: (audio: Float32Array) => {
+          setVadSpeaking(false)
+          if (audio.length < 16000 * 0.3) return // <0.3s — breath, not speech
+          const sock = wsRef.current
+          if (!sock || sock.readyState !== WebSocket.OPEN) return
+          const wav = utils.encodeWAV(audio)
+          const b64 = utils.arrayBufferToBase64(wav)
+          setLatencyMs(null)
+          sendTimeRef.current = Date.now()
+          setQrPayment(null)
+          sock.send(JSON.stringify({ type: 'audio', audio: b64 }))
+          setIsProcessing(true)
+        },
+      })
+      vad.start()
+      vadRef.current = vad
+      setHandsFree(true)
+      toast('Hands-free listening on — just talk', { icon: '🎙️' })
+    } catch (e) {
+      console.error('VAD init failed:', e)
+      toast.error('Could not start hands-free mic')
+    }
+  }, [])
+
+  // Tear down the mic when leaving the chat
+  useEffect(() => () => { vadRef.current?.destroy() }, [])
+
   // Chunk queue — managed via refs to avoid stale closures in event handlers
   const chunkQueueRef = useRef<VideoChunk[]>([])
   const isPlayingRef = useRef(false)
@@ -922,6 +977,22 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
                   <RotateCcw size={15} />
                 </button>
               )}
+              {/* Hands-free continuous listening (VAD) */}
+              <button
+                onClick={toggleHandsFree}
+                className={`btn-icon ${
+                  handsFree
+                    ? vadSpeaking
+                      ? 'text-green-300 border-green-400/60 animate-pulse'
+                      : 'text-green-400 border-green-500/40'
+                    : ''
+                }`}
+                title={handsFree ? 'Hands-free ON — just talk (click to stop)' : 'Enable hands-free listening'}
+                aria-label={handsFree ? 'Disable hands-free listening' : 'Enable hands-free listening'}
+                aria-pressed={handsFree}
+              >
+                <Mic size={15} />
+              </button>
               <button
                 onClick={() => setIsMuted(m => !m)}
                 className={`btn-icon ${isMuted ? 'text-red-400 border-red-500/30' : ''}`}
