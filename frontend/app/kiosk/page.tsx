@@ -123,6 +123,15 @@ export default function KioskPage() {
       const vad = await MicVAD.new({
         baseAssetPath: '/vad/',
         onnxWASMBasePath: '/vad/',
+        // Kiosk = open speakers + open mic. Without explicit AEC the avatar's
+        // own voice trips the VAD and barge-ins every reply mid-sentence.
+        additionalAudioConstraints: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        positiveSpeechThreshold: 0.65, // stricter than default — ignore playback bleed
+        minSpeechFrames: 8, // ~250ms of sustained speech before it counts
         onSpeechStart: () => {
           setListening(true)
           const sock = wsRef.current

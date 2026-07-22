@@ -261,6 +261,15 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
       const vad = await MicVAD.new({
         baseAssetPath: '/vad/',
         onnxWASMBasePath: '/vad/',
+        // Open speakers + open mic: force AEC so the avatar's own audio
+        // doesn't trip the VAD and self-interrupt (see kiosk page).
+        additionalAudioConstraints: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        positiveSpeechThreshold: 0.65,
+        minSpeechFrames: 8,
         onSpeechStart: () => {
           setVadSpeaking(true)
           // Barge-in the moment the guest starts talking — don't wait for
