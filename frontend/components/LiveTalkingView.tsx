@@ -10,6 +10,10 @@ interface LiveTalkingViewProps {
    *  the chat backend needs it to route speakable text to this stream. */
   onSessionId: (sessionid: string) => void
   muted: boolean
+  /** 'cover' crops to fill (default; fine for matched aspect ratios).
+   *  'contain' letterboxes — full-screen kiosk with a portrait source
+   *  otherwise crops down to just the face. */
+  objectFit?: 'cover' | 'contain'
 }
 
 /**
@@ -20,7 +24,7 @@ interface LiveTalkingViewProps {
  * motion while it listens. Replaces the chunked <video> player entirely —
  * there is no per-sentence loading, so no frozen gaps.
  */
-export default function LiveTalkingView({ serverUrl, onSessionId, muted }: LiveTalkingViewProps) {
+export default function LiveTalkingView({ serverUrl, onSessionId, muted, objectFit = 'cover' }: LiveTalkingViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const [status, setStatus] = useState<'connecting' | 'streaming' | 'failed'>('connecting')
@@ -95,7 +99,7 @@ export default function LiveTalkingView({ serverUrl, onSessionId, muted }: LiveT
     <div className="absolute inset-0">
       <video
         ref={videoRef}
-        className="w-full h-full object-cover"
+        className={`w-full h-full ${objectFit === 'contain' ? 'object-contain' : 'object-cover'}`}
         autoPlay
         playsInline
         muted={muted}

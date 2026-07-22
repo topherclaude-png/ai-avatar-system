@@ -175,6 +175,7 @@ export default function KioskPage() {
         <LiveTalkingView
           serverUrl={LIVETALKING_URL}
           muted={false}
+          objectFit="contain"
           onSessionId={(sid) => {
             ltSidRef.current = sid
             const sock = wsRef.current
