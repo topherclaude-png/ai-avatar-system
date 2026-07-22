@@ -123,6 +123,20 @@ def _drain_chunks(buf: str, sep_re: "re.Pattern[str]", min_len: int, max_len: in
 # Per-message input cap. Long inputs waste LLM tokens and create DoS surface.
 MAX_TEXT_INPUT_LEN = 4000
 
+# ── speech sanitizing ───────────────────────────────────────────────────────
+# Models emit markdown no matter what the prompt says; TTS reads it verbatim
+# ("asterisk asterisk Sam"). Strip formatting from anything that will be
+# SPOKEN — display text keeps its markdown.
+_SPEECH_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_SPEECH_MD_RE = re.compile(r"(\*\*|\*|__|`+|~~|^#+\s?|^>\s?|^[-•]\s+)", re.MULTILINE)
+
+
+def _speechify(text: str) -> str:
+    """Markdown-free, TTS-friendly version of a sentence."""
+    text = _SPEECH_LINK_RE.sub(r"\1", text)
+    text = _SPEECH_MD_RE.sub("", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
 # Conversation memory cap — keep the most recent N user/assistant pairs.
 # System prompt is stored separately so it survives trimming.
 MAX_CONTEXT_MESSAGES = 60
@@ -840,6 +854,11 @@ class ConnectionManager:
                     )
                     continue
 
+                # Never speak markdown ("asterisk asterisk Sam").
+                speech = _speechify(sentence)
+                if not speech:
+                    continue
+
                 # Cloned voice: synthesize locally (Chatterbox + the session's
                 # voice profile) and push AUDIO for lip-sync. No profile →
                 # push text and let LiveTalking's own TTS speak it.
@@ -847,7 +866,7 @@ class ConnectionManager:
                     tmp_wav = _private_session_dir(session_id) / f"{uuid.uuid4().hex[:12]}_lt.wav"
                     try:
                         synth = await tts_service.synthesize(
-                            text=sentence,
+                            text=speech,
                             output_path=str(tmp_wav),
                             speaker_wav=speaker_wav,
                             language=language,
@@ -857,14 +876,14 @@ class ConnectionManager:
                         else:
                             # Clone failed (fallback voice) — LiveTalking's own
                             # TTS sounds better than gTTS; send text instead.
-                            await livetalk.speak(lt_sid, sentence)
+                            await livetalk.speak(lt_sid, speech)
                     except Exception as e:
                         logger.error(f"Cloned-voice synth failed [{session_id}]: {e}")
-                        await livetalk.speak(lt_sid, sentence)
+                        await livetalk.speak(lt_sid, speech)
                     finally:
                         tmp_wav.unlink(missing_ok=True)
                 else:
-                    await livetalk.speak(lt_sid, sentence)
+                    await livetalk.speak(lt_sid, speech)
             return
 
         # If no avatar image, drain queue silently
@@ -930,7 +949,7 @@ class ConnectionManager:
                     **{"chars": len(sentence), "lang": language, "cloned": bool(speaker_wav)},
                 ):
                     synth = await tts_service.synthesize(
-                        text=sentence,
+                        text=_speechify(sentence),
                         output_path=str(tmp_audio),
                         speaker_wav=speaker_wav,
                         language=language,
