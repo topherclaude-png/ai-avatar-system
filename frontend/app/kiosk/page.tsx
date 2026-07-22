@@ -9,7 +9,7 @@
  *
  * Prereq: sign in once in the normal app on this browser (the kiosk reuses
  * the stored token), and open /kiosk?avatar=<name-or-id> (defaults to the
- * avatar named "Sam", else the newest one).
+ * avatar named "Chris", else the newest one).
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -94,7 +94,7 @@ export default function KioskPage() {
 
       // Resolve the avatar: ?avatar=<name-or-id>, else "Sam", else newest.
       const params = new URLSearchParams(window.location.search)
-      const want = (params.get('avatar') || 'Sam').toLowerCase()
+      const want = (params.get('avatar') || 'Chris').toLowerCase()
       const avatars: Array<{ id: string; name: string }> = await api.getAvatars()
       const av =
         avatars.find(a => a.id === params.get('avatar')) ||
@@ -238,7 +238,7 @@ export default function KioskPage() {
           className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-6 bg-gradient-to-b from-black via-[#0d0620] to-black"
         >
           <span className="text-6xl font-black tracking-tight text-white">YOU<span className="text-violet-400">42</span></span>
-          <span className="text-xl text-white/70">Meet Sam, your virtual host</span>
+          <span className="text-xl text-white/70">Meet Chris, your virtual host</span>
           <span className="mt-6 px-8 py-4 rounded-full border border-violet-400/50 text-violet-200 text-lg animate-pulse">
             Touch to start talking
           </span>
@@ -248,12 +248,12 @@ export default function KioskPage() {
       {/* Connecting / error states */}
       {phase === 'connecting' && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70">
-          <span className="text-white/70 text-lg animate-pulse">Waking Sam up…</span>
+          <span className="text-white/70 text-lg animate-pulse">Waking Chris up…</span>
         </div>
       )}
       {phase === 'error' && (
         <button onClick={() => window.location.reload()} className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/85">
-          <span className="text-white/80 text-lg">Sam stepped away for a moment.</span>
+          <span className="text-white/80 text-lg">Chris stepped away for a moment.</span>
           {errorMsg && <span className="text-white/40 text-sm max-w-md text-center">{errorMsg}</span>}
           <span className="px-6 py-3 rounded-full border border-white/30 text-white/70">Tap to retry</span>
         </button>
