@@ -258,16 +258,15 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
     }
     try {
       const { MicVAD, utils } = await import('@ricky0123/vad-web')
+      // Open speakers + open mic: force AEC so the avatar's own audio
+      // doesn't trip the VAD and self-interrupt (see kiosk page).
+      const micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      })
       const vad = await MicVAD.new({
         baseAssetPath: '/vad/',
         onnxWASMBasePath: '/vad/',
-        // Open speakers + open mic: force AEC so the avatar's own audio
-        // doesn't trip the VAD and self-interrupt (see kiosk page).
-        additionalAudioConstraints: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        stream: micStream,
         positiveSpeechThreshold: 0.65,
         minSpeechFrames: 8,
         onSpeechStart: () => {
