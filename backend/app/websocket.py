@@ -378,14 +378,18 @@ class ConnectionManager:
         arrives mid-response — modern voice-AI UX expects sub-100 ms cutoff
         so the user doesn't keep hearing the previous response while talking.
         """
+        # Engine v2: ALWAYS flush LiveTalking's speech queue, whether or not a
+        # server-side turn is still running. Turns finish in seconds while the
+        # audio plays for a minute — gating the flush on an active turn made
+        # barge-in a no-op most of the time and let the audio backlog snowball
+        # until the avatar seemed dead (observed live at the demo rehearsal).
+        lt_sid = self.session_data.get(session_id, {}).get("livetalk_sessionid")
+        if livetalk.enabled() and lt_sid:
+            asyncio.create_task(livetalk.interrupt(lt_sid))
+
         task = self._active_turns.pop(session_id, None)
         if task and not task.done():
             task.cancel()
-            # Engine v2: also flush LiveTalking's speech queue so the stream
-            # stops talking, not just our pipeline.
-            lt_sid = self.session_data.get(session_id, {}).get("livetalk_sessionid")
-            if livetalk.enabled() and lt_sid:
-                asyncio.create_task(livetalk.interrupt(lt_sid))
             # Tell the client to stop playing the queued video chunks too —
             # otherwise they'd keep arriving from the buffer.
             await self.send_message(
