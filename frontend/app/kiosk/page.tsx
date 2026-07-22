@@ -205,11 +205,12 @@ export default function KioskPage() {
         </div>
       )}
 
-      {/* QR overlay */}
+      {/* QR overlay — centered card on small screens (a right-pinned,
+          upscaled card clips off narrow viewports), docked right on large */}
       {qrPayment && (
-        <div className="absolute inset-y-0 right-10 z-40 flex items-center">
-          <div className="scale-125 origin-right">
-            <QrOverlay payment={qrPayment} onDismiss={() => setQrPayment(null)} />
+        <div className="absolute inset-0 z-40 flex items-center justify-center md:justify-end md:pr-10 pointer-events-none">
+          <div className="pointer-events-auto md:scale-125 md:origin-right">
+            <QrOverlay payment={qrPayment} onDismiss={() => setQrPayment(null)} floating={false} />
           </div>
         </div>
       )}

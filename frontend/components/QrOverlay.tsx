@@ -12,6 +12,9 @@ export interface QrPayment {
 interface QrOverlayProps {
   payment: QrPayment
   onDismiss: () => void
+  /** true (default): absolutely positioned for the chat video panel.
+   *  false: renders in normal flow so a parent (kiosk) controls placement. */
+  floating?: boolean
 }
 
 /**
@@ -19,11 +22,11 @@ interface QrOverlayProps {
  * `show_payment_qr` tool call. The guest scans with their phone; the URL is
  * a stub in the POC (checkout integration is post-POC, backend-only swap).
  */
-export default function QrOverlay({ payment, onDismiss }: QrOverlayProps) {
+export default function QrOverlay({ payment, onDismiss, floating = true }: QrOverlayProps) {
   return (
     <div
-      className="absolute top-3 left-3 z-30 glass-card rounded-2xl border border-white/15 p-4
-                 flex flex-col items-center gap-3 animate-slide-up shadow-2xl"
+      className={`${floating ? 'absolute top-3 left-3' : 'relative'} z-30 glass-card rounded-2xl border border-white/15 p-4
+                 flex flex-col items-center gap-3 animate-slide-up shadow-2xl`}
       role="dialog"
       aria-label="Payment QR code"
     >
