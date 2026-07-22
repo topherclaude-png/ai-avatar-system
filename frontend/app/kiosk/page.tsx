@@ -120,20 +120,21 @@ export default function KioskPage() {
 
       // Hands-free mic (the tap that got us here satisfies the gesture rule)
       const { MicVAD, utils } = await import('@ricky0123/vad-web')
-      // Kiosk = open speakers + open mic. Without explicit AEC the avatar's
-      // own voice trips the VAD and barge-ins every reply mid-sentence, so
-      // we open the mic ourselves with echo cancellation forced on.
-      const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      })
       const vad = await MicVAD.new({
         baseAssetPath: '/vad/',
         onnxWASMBasePath: '/vad/',
-        stream: micStream,
+        // Kiosk = open speakers + open mic. Without explicit AEC the avatar's
+        // own voice trips the VAD and barge-ins every reply mid-sentence.
+        getStream: () =>
+          navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          }),
         positiveSpeechThreshold: 0.65, // stricter than default — ignore playback bleed
-        minSpeechFrames: 8, // ~250ms of sustained speech before it counts
-        onSpeechStart: () => {
-          setListening(true)
+        minSpeechMs: 250, // sustained speech before it counts
+        onSpeechStart: () => setListening(true),
+        onVADMisfire: () => setListening(false),
+        // Barge-in only on VALIDATED speech (not sub-threshold blips)
+        onSpeechRealStart: () => {
           const sock = wsRef.current
           if (sock && sock.readyState === WebSocket.OPEN) {
             sock.send(JSON.stringify({ type: 'stop' }))

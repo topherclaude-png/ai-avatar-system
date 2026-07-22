@@ -258,21 +258,22 @@ export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCre
     }
     try {
       const { MicVAD, utils } = await import('@ricky0123/vad-web')
-      // Open speakers + open mic: force AEC so the avatar's own audio
-      // doesn't trip the VAD and self-interrupt (see kiosk page).
-      const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      })
       const vad = await MicVAD.new({
         baseAssetPath: '/vad/',
         onnxWASMBasePath: '/vad/',
-        stream: micStream,
+        // Open speakers + open mic: force AEC so the avatar's own audio
+        // doesn't trip the VAD and self-interrupt (see kiosk page).
+        getStream: () =>
+          navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          }),
         positiveSpeechThreshold: 0.65,
-        minSpeechFrames: 8,
-        onSpeechStart: () => {
-          setVadSpeaking(true)
-          // Barge-in the moment the guest starts talking — don't wait for
-          // the utterance to finish. Backend no-ops if nothing is playing.
+        minSpeechMs: 250,
+        onSpeechStart: () => setVadSpeaking(true),
+        onVADMisfire: () => setVadSpeaking(false),
+        // Barge-in only on VALIDATED speech — sub-threshold blips (speaker
+        // bleed, coughs) must not cancel the reply. Backend no-ops if idle.
+        onSpeechRealStart: () => {
           const sock = wsRef.current
           if (sock && sock.readyState === WebSocket.OPEN) {
             sock.send(JSON.stringify({ type: 'stop' }))
