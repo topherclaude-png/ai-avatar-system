@@ -179,6 +179,47 @@ async def root():
     }
 
 
+@app.get("/pay")
+async def payment_stub(event: str = "", amount: str = ""):
+    """
+    Demo checkout page the payment QR points at (PAYMENT_URL_STUB). The POC
+    brief stubs payments — but the stub must still LOAD on the guest's phone,
+    so it lives here instead of a placeholder domain. No real charging.
+    """
+    from fastapi.responses import HTMLResponse
+
+    # Untrusted query params go into HTML — escape them.
+    import html as _html
+
+    # Event ids are slugs ("ev-cohort-showcase") — prettify for the guest.
+    pretty = (event or "").removeprefix("ev-").replace("-", " ").title()
+    ev = _html.escape(pretty or "Your event")
+    amt = _html.escape(amount or "")
+    amount_row = (
+        f'<div style="font-size:2.4rem;font-weight:800;margin:12px 0">${amt}</div>' if amt else ""
+    )
+    return HTMLResponse(
+        f"""<!doctype html><html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>You42 Checkout</title></head>
+<body style="margin:0;background:#0b0614;color:#fff;font-family:system-ui,sans-serif;
+             display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center">
+<div style="padding:32px;max-width:420px">
+  <div style="font-size:2rem;font-weight:900;letter-spacing:-1px">YOU<span style="color:#a78bfa">42</span></div>
+  <div style="margin-top:24px;padding:24px;border:1px solid rgba(255,255,255,.15);border-radius:16px;background:rgba(255,255,255,.05)">
+    <div style="color:#c4b5fd;font-size:.9rem;text-transform:uppercase;letter-spacing:1px">Ticket checkout</div>
+    <div style="font-size:1.2rem;margin-top:8px">{ev}</div>
+    {amount_row}
+    <button disabled style="margin-top:16px;padding:14px 40px;border-radius:999px;border:0;
+        background:#7c3aed;color:#fff;font-size:1rem;font-weight:600;opacity:.85">Pay now</button>
+    <div style="margin-top:14px;color:rgba(255,255,255,.45);font-size:.8rem">
+      Demo preview — payments are not enabled in this pilot.
+    </div>
+  </div>
+</div></body></html>"""
+    )
+
+
 @app.get("/health")
 async def health_check():
     services: dict[str, str] = {}
